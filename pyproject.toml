@@ -1,0 +1,33 @@
+[project]
+name = "seccert"
+version = "1.0.0"
+description = "SecCert — a mini ACME (RFC 8555) certificate authority for closed networks."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Austin Probe" }]
+keywords = ["acme", "ca", "pki", "tls", "certificates", "air-gapped", "closed-network", "cmmc"]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "cryptography>=43",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+docs = ["sphinx>=7", "furo>=2024.1", "myst-parser>=2"]
+
+[project.scripts]
+seccert = "seccert.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/seccert"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

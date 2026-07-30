@@ -1,0 +1,6 @@
+SecCert
+Copyright 2026 Austin Probe
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+SecCert is an ACME (RFC 8555) certificate authority for closed networks.

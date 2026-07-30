@@ -1,0 +1,37 @@
+# SecCert demo stack: the CA plus a real certbot client that obtains a cert over HTTP-01.
+#
+#   docker compose up --build
+#
+# The `client` service runs certbot against SecCert inside the compose network. SecCert
+# reaches the client at hostname `client` on :80 to validate the challenge, exactly as it
+# would reach an internal host in a closed network.
+services:
+  seccert:
+    build: .
+    image: secrouter/seccert:latest
+    environment:
+      # Clients (and SecCert's own ACME URLs) use this base inside the compose network.
+      SECCERT_EXTERNAL_URL: http://seccert:14000
+      SECCERT_ADMIN_TOKEN: demo-admin-token
+      SECCERT_HTTP01_PORT: "80"
+    volumes:
+      - seccert-data:/var/lib/seccert
+    ports:
+      - "14000:14000"   # console at http://localhost:14000/admin
+
+  client:
+    image: certbot/certbot:latest
+    depends_on:
+      - seccert
+    # certbot --standalone serves the HTTP-01 response on :80; SecCert fetches it at http://client/
+    entrypoint: >
+      sh -c "sleep 4 &&
+      certbot certonly --standalone --non-interactive --no-eff-email --agree-tos
+      -m demo@example.internal
+      --server http://seccert:14000/acme/directory
+      -d client &&
+      echo '=== issued ===' && ls -l /etc/letsencrypt/live/client &&
+      openssl x509 -in /etc/letsencrypt/live/client/fullchain.pem -noout -subject -issuer -ext subjectAltName"
+
+volumes:
+  seccert-data:
