@@ -177,7 +177,7 @@ def build_router(ctx: Context) -> APIRouter:
 
         contact = payload.get("contact", []) or []
         acc = ctx.store.create_account(thumbprint, parsed.jwk, contact)
-        ctx.store.audit("account.created", account=acc["id"])
+        ctx.store.audit("account.created", principal=f"acme:{acc['id']}", account=acc["id"])
         return JSONResponse(
             account_json(acc), status_code=201, headers={"Location": ctx.account_url(acc["id"])}
         )
@@ -221,7 +221,9 @@ def build_router(ctx: Context) -> APIRouter:
         order = ctx.store.create_order(
             acc["id"], names, payload.get("notBefore"), payload.get("notAfter"), expires
         )
-        ctx.store.audit("order.created", order=order["id"], identifiers=names)
+        ctx.store.audit(
+            "order.created", principal=f"acme:{acc['id']}", order=order["id"], identifiers=names
+        )
         return JSONResponse(
             order_json(order), status_code=201, headers={"Location": ctx.order_url(order["id"])}
         )
@@ -271,14 +273,21 @@ def build_router(ctx: Context) -> APIRouter:
         if ok:
             ctx.store.set_challenge_result(chall_id, "valid")
             ctx.store.set_authorization_status(authz["id"], "valid")
-            ctx.store.audit("challenge.valid", identifier=authz["identifier"])
+            ctx.store.audit(
+                "challenge.valid", principal=f"acme:{acc['id']}", identifier=authz["identifier"]
+            )
         else:
             kind, detail = err  # type: ignore[misc]
             error_obj = {"type": ACME_ERROR_NS + kind, "detail": detail}
             ctx.store.set_challenge_result(chall_id, "invalid", error_obj)
             ctx.store.set_authorization_status(authz["id"], "invalid")
             ctx.store.set_order_status(authz["order_id"], "invalid", error_obj)
-            ctx.store.audit("challenge.invalid", identifier=authz["identifier"], detail=detail)
+            ctx.store.audit(
+                "challenge.invalid",
+                principal=f"acme:{acc['id']}",
+                identifier=authz["identifier"],
+                detail=detail,
+            )
         ctx.store.refresh_order_status(authz["order_id"])
         return JSONResponse(challenge_json(ctx.store.get_challenge(chall_id)), headers=link)  # type: ignore[arg-type]
 
@@ -324,7 +333,12 @@ def build_router(ctx: Context) -> APIRouter:
             acc["id"], order_id, serial, order["identifiers"],
             leaf.public_bytes(Encoding.PEM), chain, _iso(not_after),
         )
-        ctx.store.audit("certificate.issued", serial=serial, identifiers=order["identifiers"])
+        ctx.store.audit(
+            "certificate.issued",
+            principal=f"acme:{acc['id']}",
+            serial=serial,
+            identifiers=order["identifiers"],
+        )
         return JSONResponse(order_json(ctx.store.get_order(order_id)))  # type: ignore[arg-type]
 
     @router.post("/acme/certificate/{cert_id}")
@@ -373,7 +387,12 @@ def build_router(ctx: Context) -> APIRouter:
             raise AcmeError("alreadyRevoked", "certificate is already revoked")
         reason = payload.get("reason")
         ctx.store.revoke_certificate(serial, reason if isinstance(reason, int) else None)
-        ctx.store.audit("certificate.revoked", serial=serial, reason=reason)
+        # Attribute to the certificate's owning account either way: the 'kid' path IS that
+        # account; the 'jwk' (cert-key self-revocation) path never resolved an account object,
+        # but the cert being revoked always belongs to one — `stored["account_id"]`.
+        ctx.store.audit(
+            "certificate.revoked", principal=f"acme:{stored['account_id']}", serial=serial, reason=reason
+        )
         return Response(status_code=200)
 
     return router

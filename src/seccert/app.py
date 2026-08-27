@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
+from . import auth
 from .acme.router import build_router as build_acme_router
 from .admin.api import build_router as build_admin_router
 from .ca import CertificateAuthority
@@ -50,6 +51,9 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     app.include_router(build_acme_router(ctx))
     app.include_router(build_admin_router(ctx))
+    # Optional SSO for the admin plane (off unless SECCERT_OIDC_* is set) — adds /auth/* + a
+    # principal-resolving middleware. The ACME surface (/acme/*) is untouched; see auth.py.
+    auth.install(app)
 
     if config.admin_token_generated:
         log.warning(

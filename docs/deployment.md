@@ -60,6 +60,32 @@ uv run seccert          # serves on 0.0.0.0:14000
 Set `SECCERT_CA_PASSPHRASE` to encrypt the Root and Intermediate private keys on disk
 (PKCS#8, best-available encryption). Without it, keys rely on the owner-only data volume.
 
+## Optional: SecSSO admin login
+
+By default the admin console/API accept only `SECCERT_ADMIN_TOKEN`. To put the admin
+plane behind your SecSSO IdP instead (the static token stays valid as break-glass), add:
+
+```bash
+# SECCERT_PUBLIC_URL is behind a TLS-terminating proxy (see TLS above) — the browser
+# login's session cookie is only marked secure when this is an https:// address.
+docker run -d --name seccert \
+  -p 14000:14000 \
+  -v seccert-data:/var/lib/seccert \
+  -e SECCERT_EXTERNAL_URL=https://ca.internal.example \
+  -e SECCERT_ADMIN_TOKEN=$(openssl rand -hex 24) \
+  -e SECCERT_OIDC_ISSUER=https://sso.internal.example/application/o/seccert/ \
+  -e SECCERT_OIDC_CLIENT_ID=seccert \
+  -e SECCERT_OIDC_CLIENT_SECRET=<confidential client secret> \
+  -e SECCERT_PUBLIC_URL=https://ca.internal.example \
+  -e SECCERT_SESSION_SECRET=$(openssl rand -hex 32) \
+  --restart unless-stopped \
+  secrouter/seccert:latest
+```
+
+A login is only accepted as admin if it carries the `SECCERT_ADMIN_GROUP` group
+(default `seccert-admins`) — everyone else is authenticated but not an admin. See the
+full variable list in {doc}`reference` and the auth model in {doc}`security`.
+
 ## Hardening checklist
 
 - Mount `/var/lib/seccert` on encrypted storage; restrict access to the CA operator.
@@ -67,3 +93,5 @@ Set `SECCERT_CA_PASSPHRASE` to encrypt the Root and Intermediate private keys on
 - Terminate TLS (proxy or native) — don't expose plain HTTP outside the host.
 - Keep `SECCERT_LEAF_DAYS` short (default 90) so mis-issuance is self-healing.
 - Distribute the Root out-of-band and verify its SHA-256 fingerprint (see `/health`).
+- Periodically call `GET /admin/api/audit/verify` (or pull `/admin/api/evidence`) to
+  confirm the audit ledger is intact.

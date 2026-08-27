@@ -9,10 +9,10 @@ CA **you** run and trust. Think "a tiny Let's Encrypt for your `.mil`/`.internal
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![ACME](https://img.shields.io/badge/ACME-RFC%208555-444)](https://datatracker.ietf.org/doc/html/rfc8555)
 
-Part of the **SecRouter** family — pairs naturally with SecRouter's TLS front end and any
-service that needs certs without reaching out to a public CA.
-
----
+Part of the [SecRouter suite](https://github.com/secrouter/secdeploy#the-suite) — deployed
+first on every target as the internal CA. Pairs naturally with
+[SecRouter](https://github.com/secrouter/secrouter)'s TLS front end and
+[SecSSO](https://github.com/secrouter/secsso) for optional admin login (see below).
 
 ## Why
 
@@ -27,9 +27,9 @@ leaves your boundary.
 - **Offline** — everything (key generation, issuance, validation) happens in-network. No
   telemetry, no external calls.
 - **Small & auditable** — Python + FastAPI + `cryptography`, one container, SQLite state,
-  an issuance audit ledger.
+  a hash-chained, tamper-evident issuance ledger.
 
-## Quickstart (Docker)
+## Quickstart
 
 ```bash
 docker run -d --name seccert \
@@ -49,15 +49,9 @@ curl -o seccert-root.pem http://ca.internal.example:14000/ca.crt
 Then point a client at the ACME directory:
 
 ```bash
-# certbot (standalone http-01)
 certbot certonly --standalone \
   --server http://ca.internal.example:14000/acme/directory \
   -d app.internal.example --agree-tos -m ops@internal.example
-
-# acme.sh
-acme.sh --issue --standalone \
-  --server http://ca.internal.example:14000/acme/directory \
-  -d app.internal.example
 ```
 
 Or from source with [`uv`](https://docs.astral.sh/uv/):
@@ -66,72 +60,31 @@ Or from source with [`uv`](https://docs.astral.sh/uv/):
 uv run seccert           # serves on 0.0.0.0:14000
 ```
 
-## Distributing the trust anchor
+## Documentation
 
-Clients validate SecCert-issued certs by trusting the **Root** (never the Intermediate — the
-served chain already includes it). Distribute `GET /ca.crt` to your fleet:
+Full docs (deployment, client integration, trust-anchor distribution, security posture,
+environment/endpoint reference) live in [`docs/`](docs/) and build with Sphinx:
 
-- **Linux:** drop it in `/usr/local/share/ca-certificates/` → `update-ca-certificates`
-- **RHEL:** `/etc/pki/ca-trust/source/anchors/` → `update-ca-trust`
-- **Browsers / Java / Windows:** import into the respective trust store
+```bash
+uv run --with-requirements docs/requirements.txt sphinx-build -b html docs docs/_build
+```
 
-`GET /roots` returns the same anchor as a PEM bundle for automation.
+Start at [`docs/index.md`](docs/index.md) — or, once built, open `docs/_build/index.html`.
 
-## ACME endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /acme/directory` | ACME directory (entry point for clients) |
-| `HEAD/GET /acme/new-nonce` | Fresh anti-replay nonce |
-| `POST /acme/new-account` | Register/look up an account (JWS, `jwk`) |
-| `POST /acme/new-order` | Request a cert for one or more DNS identifiers |
-| `POST /acme/authz/{id}` | Authorization + its challenges |
-| `POST /acme/challenge/{id}` | Signal a challenge is ready → SecCert validates (HTTP-01) |
-| `POST /acme/order/{id}/finalize` | Submit the CSR → SecCert issues |
-| `POST /acme/certificate/{id}` | Download the issued chain (leaf + intermediate) |
-| `POST /acme/revoke-cert` | Revoke a certificate |
+- [Deployment](docs/deployment.md) — container, TLS modes, SecSSO admin login, hardening.
+- [ACME client integration](docs/clients.md) — certbot, acme.sh, Caddy, Traefik, lego.
+- [Trust anchor distribution](docs/trust.md) — getting the Root into every OS/runtime.
+- [Security posture](docs/security.md) — key handling, audit chain, control mapping.
+- [Reference](docs/reference.md) — every `SECCERT_*` variable and every endpoint.
 
 ## Admin console & API
 
-`GET /admin` — a dependency-free console (SecRouter field-console theme): list & inspect
-issued certificates, revoke, download the Root, and see CA info. Admin calls use a bearer
-token (`SECCERT_ADMIN_TOKEN`; auto-generated and logged on first boot if unset).
-
-| Endpoint | Auth | Purpose |
-|---|---|---|
-| `GET /ca.crt` · `/roots` | open | Root trust anchor (PEM) |
-| `GET /health` | open | Liveness + CA fingerprint |
-| `GET /admin/api/certificates` | admin | List issued/revoked certs |
-| `POST /admin/api/certificates/{serial}/revoke` | admin | Revoke a cert |
-| `GET /crl` | open | Certificate revocation list (DER) |
-
-## Configuration (environment)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `SECCERT_EXTERNAL_URL` | `http://localhost:<port>` | Base URL clients use; every ACME URL is built from it |
-| `SECCERT_DATA_DIR` | `./data` | CA keys + SQLite state (mount a volume) |
-| `SECCERT_HOST` / `SECCERT_PORT` | `0.0.0.0` / `14000` | Bind address |
-| `SECCERT_CA_KEY_TYPE` | `ecdsa-p384` | Root/Intermediate key: `ecdsa-p256\|ecdsa-p384\|rsa-3072\|rsa-4096` |
-| `SECCERT_LEAF_DAYS` | `90` | Issued-cert lifetime |
-| `SECCERT_ROOT_DAYS` / `SECCERT_INTERMEDIATE_DAYS` | `7300` / `1825` | CA validity |
-| `SECCERT_HTTP01_PORT` | `80` | Port SecCert fetches for HTTP-01 validation |
-| `SECCERT_CA_PASSPHRASE` | — | Encrypt CA private keys at rest |
-| `SECCERT_TLS_MODE` | `none` | `none` (HTTP, behind a proxy) or `native` (SecCert terminates TLS) |
-| `SECCERT_ADMIN_TOKEN` | auto | Bearer token for the admin console/API |
-| `SECCERT_REQUIRE_EAB` | `false` | Require External Account Binding on new accounts |
-
-## Security posture
-
-- CA private keys are generated in-container and stored owner-only in the data volume;
-  optional passphrase encryption at rest (`SECCERT_CA_PASSPHRASE`).
-- Only the Intermediate signs at request time; the Root signs exactly once (the Intermediate).
-- Every issuance and revocation is written to an append-only audit ledger.
-- HTTP-01 is validated by SecCert reaching the requesting host inside the boundary — no
-  inbound path from the public internet is required or used.
-- ACME normally runs over HTTPS. In `native` TLS mode SecCert serves with a certificate it
-  **self-issues** for its own hostname; otherwise run it behind a TLS-terminating proxy.
+`GET /admin` — a dependency-free console: list & inspect issued certificates, revoke,
+download the Root, and see CA info. Gated by a bearer token (`SECCERT_ADMIN_TOKEN`,
+auto-generated and logged on first boot if unset) or, optionally, SecSSO login — see
+[Deployment](docs/deployment.md#optional-secsso-admin-login).
 
 ## License
 
-[Apache 2.0](LICENSE) — Copyright 2026 Austin Probe.
+[Apache 2.0](LICENSE) — Copyright 2026 Austin Probe. See [CHANGELOG.md](CHANGELOG.md) for
+release history.

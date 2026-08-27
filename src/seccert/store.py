@@ -8,12 +8,20 @@ RFC 8555 JSON with absolute URLs. All timestamps are ISO-8601 UTC strings.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import secrets
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+
+# Hash-chain genesis anchor (Spec B.2). The very first hash-chained audit row's
+# prev_hash is this literal constant, never a real hash.
+GENESIS = "GENESIS"
+# ASCII Unit Separator — an unambiguous field boundary for the canonical join below (no escaping
+# needed since 0x1f cannot appear in any of the joined fields' natural text/JSON representations).
+_CHAIN_SEP = "\x1f"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -79,6 +87,17 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
+# Columns added by the Spec B audit hash-chain work, applied via ALTER TABLE (see
+# Store._migrate_audit_columns) rather than the CREATE-TABLE-IF-NOT-EXISTS above, so existing
+# deployments upgrade in place without losing their audit history. All three are
+# nullable: rows written before this migration have none of them set (NULL) and are
+# "grandfathered" — see verify_audit_chain for what that means for verification.
+_AUDIT_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("principal", "TEXT"),   # acting identity: "acme:<account id>" or an admin principal
+    ("prev_hash", "TEXT"),   # hash of the previous hash-chained row, or GENESIS for the first one
+    ("hash", "TEXT"),        # SHA-256 over this row's own fields (see Store._chain_hash)
+)
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -98,26 +117,119 @@ class Store:
         self._db.execute("PRAGMA foreign_keys=ON")
         with self._lock:
             self._db.executescript(_SCHEMA)
+            self._migrate_audit_columns()
             self._db.commit()
 
     def close(self) -> None:
         self._db.close()
 
-    # ---- audit -------------------------------------------------------------
+    def _migrate_audit_columns(self) -> None:
+        """Add the hash-chain columns to `audit` if this is an existing pre-chain database.
+        Must be called with self._lock held and before any commit; caller commits."""
+        existing = {r["name"] for r in self._db.execute("PRAGMA table_info(audit)").fetchall()}
+        for name, coltype in _AUDIT_MIGRATION_COLUMNS:
+            if name not in existing:
+                self._db.execute(f"ALTER TABLE audit ADD COLUMN {name} {coltype}")
 
-    def audit(self, event: str, **detail: Any) -> None:
+    # ---- audit ---------------------------------------------------------------
+    #
+    # Hash chain (Spec B.2): each new row's `hash` is SHA-256 over a canonical join of
+    # (prev_hash, ts, event, principal, detail-json), where prev_hash is the previous
+    # hash-chained row's `hash`, or the GENESIS constant for the first one ever written.
+    # This makes the ledger tamper-evident — mutating or deleting a row breaks the chain
+    # from that point forward, which verify_audit_chain() detects.
+    #
+    # Rows written before this migration have NULL principal/prev_hash/hash — they predate
+    # the chain and are "grandfathered": verify_audit_chain() does not try to validate them,
+    # it starts at the first row that actually has a hash (see that method for why).
+
+    @staticmethod
+    def _chain_hash(prev_hash: str, ts: str, event: str, principal: str, detail_json: str) -> str:
+        payload = _CHAIN_SEP.join((prev_hash, ts, event, principal, detail_json))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _last_chain_hash(self) -> str | None:
+        row = self._db.execute(
+            "SELECT hash FROM audit WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return row["hash"] if row else None
+
+    def audit(self, event: str, principal: str, **detail: Any) -> None:
+        """Append a hash-chained, attributed audit event.
+
+        `principal` is the acting identity: an ACME account is `"acme:<account id>"`
+        (machine identity); an admin action is the admin's OIDC `sub` when SecSSO admin
+        auth is active, else the literal `"token-admin"` for the shared bearer-token
+        break-glass path. `detail` is metadata only (Spec B.3) — never certificate key
+        material, tokens, or passphrases.
+        """
+        ts = _now()
+        detail_json = json.dumps(detail, sort_keys=True)
         with self._lock:
+            prev_hash = self._last_chain_hash() or GENESIS
+            row_hash = self._chain_hash(prev_hash, ts, event, principal, detail_json)
             self._db.execute(
-                "INSERT INTO audit(ts, event, detail) VALUES (?,?,?)",
-                (_now(), event, json.dumps(detail, sort_keys=True)),
+                "INSERT INTO audit(ts, event, detail, principal, prev_hash, hash) VALUES (?,?,?,?,?,?)",
+                (ts, event, detail_json, principal, prev_hash, row_hash),
             )
             self._db.commit()
 
     def audit_log(self, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._db.execute(
-            "SELECT ts, event, detail FROM audit ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT ts, event, detail, principal, prev_hash, hash FROM audit ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
-        return [{"ts": r["ts"], "event": r["event"], "detail": json.loads(r["detail"])} for r in rows]
+        return [
+            {
+                "ts": r["ts"],
+                "event": r["event"],
+                "detail": json.loads(r["detail"]),
+                "principal": r["principal"],
+                "prevHash": r["prev_hash"],
+                "hash": r["hash"],
+            }
+            for r in rows
+        ]
+
+    def verify_audit_chain(self) -> dict[str, Any]:
+        """Walk the hash chain and report whether it's intact.
+
+        Grandfathering: rows predating the Spec B migration carry no hash at all, so they
+        are excluded outright rather than treated as a chain violation — verification
+        starts at the first row that HAS a hash (`startedAtId`) and walks forward from
+        there. An empty result (no hash-chained rows yet) is trivially `ok`.
+        """
+        rows = self._db.execute(
+            "SELECT id, ts, event, detail, principal, prev_hash, hash FROM audit "
+            "WHERE hash IS NOT NULL ORDER BY id ASC"
+        ).fetchall()
+        if not rows:
+            return {"ok": True, "checked": 0, "startedAtId": None}
+
+        started_at_id = rows[0]["id"]
+        prev = rows[0]["prev_hash"] or GENESIS
+        checked = 0
+        for row in rows:
+            if row["prev_hash"] != prev:
+                return {
+                    "ok": False,
+                    "checked": checked,
+                    "startedAtId": started_at_id,
+                    "brokenAtId": row["id"],
+                }
+            expected = self._chain_hash(
+                row["prev_hash"], row["ts"], row["event"], row["principal"] or "", row["detail"]
+            )
+            if expected != row["hash"]:
+                return {
+                    "ok": False,
+                    "checked": checked,
+                    "startedAtId": started_at_id,
+                    "brokenAtId": row["id"],
+                }
+            checked += 1
+            prev = row["hash"]
+        return {"ok": True, "checked": checked, "startedAtId": started_at_id}
 
     # ---- nonces ------------------------------------------------------------
 
