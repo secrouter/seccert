@@ -124,7 +124,7 @@ CONSOLE_HTML = r"""<!doctype html>
   </svg>
   <h1><span class="sec">SEC</span>CERT</h1><span class="tag">ACME CA console</span>
   <span id="pill" class="pill">connecting…</span>
-  <button id="themeToggle" class="ghost theme-toggle" title="Toggle light / dark">DARK</button>
+  <button id="themeToggle" class="ghost theme-toggle" title="Toggle light / dark">◐</button>
 </header>
 <main>
   <section class="card">
@@ -169,9 +169,9 @@ let signedIn = false; // true once an SSO session cookie is active (no admin tok
 
 // ── Theme (light / dark, follows OS by default, choice persisted) ──
 function effectiveTheme(){ var a=document.documentElement.getAttribute("data-theme"); if(a==="dark"||a==="light") return a; return (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light"; }
-function setTheme(t){ document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("secrouter-theme", t); } catch(e){} var b=$("themeToggle"); if(b) b.textContent = effectiveTheme()==="dark" ? "LIGHT" : "DARK"; }
+/* The ◐ glyph is theme-neutral (secrecorder's toggle pattern) — no label swap needed. */
+function setTheme(t){ document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("secrouter-theme", t); } catch(e){} }
 function toggleTheme(){ setTheme(effectiveTheme()==="dark" ? "light" : "dark"); }
-$("themeToggle").textContent = effectiveTheme()==="dark" ? "LIGHT" : "DARK";
 $("themeToggle").onclick = toggleTheme;
 
 function pill(state, text) { const p=$("pill"); p.className="pill "+state; p.textContent=text; }
